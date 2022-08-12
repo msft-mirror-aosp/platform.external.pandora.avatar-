@@ -1,0 +1,14 @@
+python_library_host {
+    name: "libavatar",
+    srcs: [
+        "avatar/*.py",
+        "avatar/bumble_server/*.py",
+        "avatar/controllers/*.py",
+    ],
+    libs: [
+        "mobly",
+        "pandora-python",
+        "libprotobuf-python",
+        "bumble",
+    ],
+}
