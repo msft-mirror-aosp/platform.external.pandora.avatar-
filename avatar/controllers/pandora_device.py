@@ -16,17 +16,22 @@ import logging
 import grpc
 import importlib
 import asyncio
-import threading
+import avatar
+import contextlib
 
 import mobly.controllers.android_device
 import mobly.signals
 
-from ..android_service import AndroidService
+from contextlib import suppress
+
+from ..android_service import ANDROID_SERVER_GRPC_PORT, AndroidService
 from ..bumble_server import BumblePandoraServer
 from ..utils import Address
 
-
 from pandora.host_grpc import Host
+from pandora.security_grpc import Security, SecurityStorage
+
+from bumble.device import Device
 
 MOBLY_CONTROLLER_CONFIG_NAME = 'PandoraDevice'
 
@@ -37,96 +42,109 @@ def create(configs):
         class_name = config.pop('class', PandoraDevice.__name__)
 
         module = importlib.import_module(module_name)
-        return getattr(module, class_name).create(**config)
+        return getattr(module, class_name)(**config)
 
     return list(map(create_device, configs))
 
-
 def destroy(devices):
-    for device in devices:
-        device.close()
+    [device.destroy() for device in devices]
 
 
 class PandoraDevice:
 
     def __init__(self, target):
-        self.channel = grpc.insecure_channel(target)
-        self.log = PandoraDeviceLoggerAdapter(logging.getLogger(), {
-            'class': self.__class__.__name__,
-            'address': self.address
-        })
+        self._address = Address(b'\x00\x00\x00\x00\x00\x00')
+        self._target = target
+        self._channel = grpc.insecure_channel(target)
+        self._aio_channel = None
+        self.log = PandoraDeviceLoggerAdapter(logging.getLogger(), self)
 
-    @classmethod
-    def create(cls, **kwargs):
-        return cls(**kwargs)
+    def destroy(self):
+        self._channel.close()
+        if self._aio_channel:
+            avatar.run_until_complete(self._aio_channel.close())
 
     @property
-    def host(self):
-        return Host(self.channel)
+    def channel(self):
+        # Force the use of the asynchronous channel when running in our event loop.
+        with contextlib.suppress(RuntimeError):
+            if asyncio.get_running_loop() == avatar.loop:
+                if not self._aio_channel:
+                    self._aio_channel = grpc.aio.insecure_channel(self._target)
+                return self._aio_channel
+        return self._channel
 
     @property
     def address(self):
-        return Address(self.host.ReadLocalAddress().address)
+        return self._address
 
-    def close(self):
-        self.channel.close()
+    @address.setter
+    def address(self, bytes):
+        self._address = Address(bytes)
+
+    @property
+    def host(self) -> Host:
+        return Host(self.channel)
+
+    @property
+    def security(self) -> Security:
+        return Security(self.channel)
+
+    @property
+    def security_storage(self) -> SecurityStorage:
+        return SecurityStorage(self.channel)
 
 
 class PandoraDeviceLoggerAdapter(logging.LoggerAdapter):
+
     def process(self, msg, kwargs):
-        msg = f'[{self.extra["class"]}|{self.extra["address"]}] {msg}'
+        msg = f'[{self.extra.__class__.__name__}|{self.extra.address}] {msg}'
         return (msg, kwargs)
 
 
 class AndroidPandoraDevice(PandoraDevice):
 
-    def __init__(self, android_device):
-        self.android_device = android_device
-        # TODO: Use a dynamic port
-        port = 8999
-        self.android_device.services.register('pandora', AndroidService, configs={
-            'port': port
-        })
-        super().__init__(f'localhost:{port}')
-
-    def close(self):
-        super().close()
-        mobly.controllers.android_device.destroy([self.android_device])
-
-    @classmethod
-    def create(cls, config):
+    def __init__(self, config):
         android_devices = mobly.controllers.android_device.create(config)
         if not android_devices:
             raise mobly.signals.ControllerError(
                 'Expected to get at least 1 android controller objects, got 0.')
         head, *tail = android_devices
         mobly.controllers.android_device.destroy(tail)
-        return cls(head)
+
+        self.android_device = head
+        port = ANDROID_SERVER_GRPC_PORT
+        self.android_device.services.register('pandora', AndroidService, configs={
+            'port': port
+        })
+        super().__init__(f'localhost:{port}')
+
+    def destroy(self):
+        super().destroy()
+        mobly.controllers.android_device.destroy([self.android_device])
 
 
 class BumblePandoraDevice(PandoraDevice):
 
-    def __init__(self, server):
-        self.server = server
-        self.loop = asyncio.get_event_loop()
-        self.loop.run_until_complete(self.server.start())
-        self.thread = threading.Thread(target=lambda: self.loop.run_forever())
-        self.thread.start()
+    def __init__(self, transport, **config):
+        asyncio.set_event_loop(avatar.loop)
+        grpc_server = grpc.aio.server()
+        grpc_port = grpc_server.add_insecure_port('localhost:0')
 
-        super().__init__(f'localhost:{self.server.grpc_port}')
+        super().__init__(f'localhost:{grpc_port}')
 
-    def close(self):
-        super().close()
-        self.loop.call_soon_threadsafe(lambda: self.loop.stop())
-        self.thread.join()
+        self.device: Device = None
+        self.server_task = avatar.loop.create_task(
+            BumblePandoraServer.serve(
+                transport, config, grpc_server, grpc_port,
+                on_started=lambda server: setattr(self, 'device', server.device)
+            )
+        )
 
-    @property
-    def device(self):
-        return self.server.device
+    def destroy(self):
+        async def server_stop():
+            self.server_task.cancel()
+            with suppress(asyncio.CancelledError): await self.server_task
 
-    @classmethod
-    def create(cls, transport, **kwargs):
-        loop = asyncio.get_event_loop()
-        server = loop.run_until_complete(
-            BumblePandoraServer.open(0, transport, kwargs))
-        return cls(server)
+        super().destroy()
+        avatar.run_until_complete(server_stop())
