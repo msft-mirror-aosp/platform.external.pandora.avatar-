@@ -32,6 +32,9 @@ from bumble.hci import (
     HCI_CONNECTION_ALREADY_EXISTS_ERROR,
     Address, HCI_Error
 )
+from bumble.gatt import (
+    Service
+)
 
 from google.protobuf.empty_pb2 import Empty
 from google.protobuf.any_pb2 import Any
@@ -58,13 +61,12 @@ class HostService(HostServicer):
         self.device = device
         self.scan_queue = asyncio.Queue()
         self.inquiry_queue = asyncio.Queue()
-        self.discoverability_mode = DiscoverabilityMode.NOT_DISCOVERABLE
-        self.connectability_mode = ConnectabilityMode.CONNECTABLE
 
     async def start(self) -> "HostService":
         # According to `host.proto`:
         # At startup, the Host must be in BR/EDR connectable mode
-        await self.device.set_scan_enable(False, True)
+        await self.device.set_discoverable(False)
+        await self.device.set_connectable(True)
         return self
 
     async def FactoryReset(self, request, context):
@@ -252,8 +254,22 @@ class HostService(HostServicer):
 
         if data := request.data:
             self.device.advertising_data = bytes(self.unpack_data_types(data))
+
+            # Retrieve services data
+            for service in self.device.gatt_server.attributes:
+                if isinstance(service, Service) and (data := service.get_advertising_data()) and (
+                    service.uuid.to_hex_str() in request.data.incomplete_service_class_uuids16 or
+                    service.uuid.to_hex_str() in request.data.complete_service_class_uuids16 or
+                    service.uuid.to_hex_str() in request.data.incomplete_service_class_uuids32 or
+                    service.uuid.to_hex_str() in request.data.complete_service_class_uuids32 or
+                    service.uuid.to_hex_str() in request.data.incomplete_service_class_uuids128 or
+                    service.uuid.to_hex_str() in request.data.complete_service_class_uuids128
+                ):
+                    self.device.advertising_data += data
+
             if scan_response_data := request.scan_response_data:
-                self.device.scan_response_data =  bytes(self.unpack_data_types(scan_response_data))
+                self.device.scan_response_data = bytes(
+                    self.unpack_data_types(scan_response_data))
                 scannable = True
             else:
                 scannable = False
@@ -335,7 +351,7 @@ class HostService(HostServicer):
         finally:
             self.device.remove_listener('advertisement', handler)
             self.scan_queue = asyncio.Queue()
-            await self.device.stop_scanning()
+            await self.device.abort_on('flush', self.device.stop_scanning())
 
     async def Inquiry(self, request, context):
         logging.info('Inquiry')
@@ -363,24 +379,16 @@ class HostService(HostServicer):
             self.device.remove_listener('inquiry_complete', complete_handler)
             self.device.remove_listener('inquiry_result', result_handler)
             self.inquiry_queue = asyncio.Queue()
-            await self.device.stop_discovery()
+            await self.device.abort_on('flush', self.device.stop_discovery())
 
     async def SetDiscoverabilityMode(self, request, context):
         logging.info("SetDiscoverabilityMode")
-        self.discoverability_mode = request.mode
-        await self.device.set_scan_enable(
-            self.discoverability_mode != DiscoverabilityMode.NOT_DISCOVERABLE,
-            self.connectability_mode != ConnectabilityMode.NOT_CONNECTABLE
-        )
+        await self.device.set_discoverable(request.mode != DiscoverabilityMode.NOT_DISCOVERABLE)
         return Empty()
 
     async def SetConnectabilityMode(self, request, context):
         logging.info("SetConnectabilityMode")
-        self.connectability_mode = request.mode
-        await self.device.set_scan_enable(
-            self.discoverability_mode != DiscoverabilityMode.NOT_DISCOVERABLE,
-            self.connectability_mode != ConnectabilityMode.NOT_CONNECTABLE
-        )
+        await self.device.set_connectable(request.mode != ConnectabilityMode.NOT_CONNECTABLE)
         return Empty()
 
     async def GetRemoteName(self, request, context):
@@ -497,6 +505,8 @@ class HostService(HostServicer):
                 AdvertisingData.LIST_OF_128_BIT_SERVICE_SOLICITATION_UUIDS,
                 bytes([reversed(bytes.fromhex(uuid)) for uuid in data])
             ))
+        # TODO: use `bytes.fromhex(uuid) + (data)` instead of `.extend`.
+        #  we may also need to remove all the `reverse`
         if data := datas.service_data_uuid16:
             res.ad_structures.extend([(
                 AdvertisingData.SERVICE_DATA_16_BIT_UUID,
