@@ -23,7 +23,6 @@ python_library_host {
         "avatar/controllers/*.py",
     ],
     libs: [
-        "mobly",
         "pandora-python",
         "libprotobuf-python",
         "bumble",
