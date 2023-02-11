@@ -222,11 +222,7 @@ class HostService(HostServicer):
     async def WaitLEConnection(
         self, request: WaitLEConnectionRequest, context: grpc.ServicerContext
     ) -> WaitLEConnectionResponse:
-        if request.address:
-            address = address_from_request(request, request.WhichOneof("address"))
-        else:
-            address = Address.ANY
-
+        address = address_from_request(request, request.WhichOneof("address"))
         self.log.info(f"WaitLEConnection: {address}")
 
         if address != Address.ANY:
