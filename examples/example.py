@@ -17,7 +17,7 @@ import grpc
 import logging
 
 from avatar import PandoraDevices, parameterized
-from avatar.aio import asynchronous
+from avatar.aio import AsyncQueue, asynchronous
 from avatar.pandora_client import Address, BumblePandoraClient, PandoraClient
 from bumble.smp import PairingDelegate
 from concurrent import futures
@@ -29,7 +29,7 @@ from mobly.asserts import assert_is_none  # type: ignore
 from mobly.asserts import assert_is_not_none  # type: ignore
 from mobly.asserts import fail  # type: ignore
 from pandora.host_grpc import ConnectLERequestDict, DataTypes, DiscoverabilityMode, OwnAddressType
-from pandora.security_grpc import LESecurityLevel, PairingEventAnswer, SecurityLevel
+from pandora.security_grpc import DeleteBondRequestDict, LESecurityLevel, PairingEventAnswer, SecurityLevel
 from typing import NoReturn, Optional
 
 
@@ -158,25 +158,31 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
         assert_equal(type(scan_response.data.complete_service_class_uuids16[0]), str)
 
     async def handle_pairing_events(self) -> NoReturn:
-        ref_pairing_stream = self.ref.aio.security.OnPairing()
-        dut_pairing_stream = self.dut.aio.security.OnPairing()
+        ref_answer_queue: AsyncQueue[PairingEventAnswer] = AsyncQueue()
+        dut_answer_queue: AsyncQueue[PairingEventAnswer] = AsyncQueue()
+
+        on_ref_pairing = self.ref.aio.security.OnPairing(ref_answer_queue)
+        on_dut_pairing = self.dut.aio.security.OnPairing(dut_answer_queue)
 
         try:
+            on_ref_pairing_events = aiter(on_ref_pairing)
+            on_dut_pairing_events = aiter(on_dut_pairing)
+
             while True:
                 ref_pairing_event, dut_pairing_event = await asyncio.gather(
-                    anext(ref_pairing_stream),
-                    anext(dut_pairing_stream),
+                    anext(on_ref_pairing_events),
+                    anext(on_dut_pairing_events),
                 )
 
                 if dut_pairing_event.WhichOneof('method') in ('numeric_comparison', 'just_works'):
                     assert_in(ref_pairing_event.WhichOneof('method'), ('numeric_comparison', 'just_works'))
-                    dut_pairing_stream.send_nowait(
+                    dut_answer_queue.put_nowait(
                         PairingEventAnswer(
                             event=dut_pairing_event,
                             confirm=True,
                         )
                     )
-                    ref_pairing_stream.send_nowait(
+                    ref_answer_queue.put_nowait(
                         PairingEventAnswer(
                             event=ref_pairing_event,
                             confirm=True,
@@ -184,7 +190,7 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
                     )
                 elif dut_pairing_event.WhichOneof('method') == 'passkey_entry_notification':
                     assert_equal(ref_pairing_event.WhichOneof('method'), 'passkey_entry_request')
-                    ref_pairing_stream.send_nowait(
+                    ref_answer_queue.put_nowait(
                         PairingEventAnswer(
                             event=ref_pairing_event,
                             passkey=dut_pairing_event.passkey_entry_notification,
@@ -192,7 +198,7 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
                     )
                 elif dut_pairing_event.WhichOneof('method') == 'passkey_entry_request':
                     assert_equal(ref_pairing_event.WhichOneof('method'), 'passkey_entry_notification')
-                    dut_pairing_stream.send_nowait(
+                    dut_answer_queue.put_nowait(
                         PairingEventAnswer(
                             event=dut_pairing_event,
                             passkey=ref_pairing_event.passkey_entry_notification,
@@ -202,8 +208,8 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
                     fail("unreachable")
 
         finally:
-            ref_pairing_stream.cancel()
-            dut_pairing_stream.cancel()
+            on_ref_pairing.cancel()
+            on_dut_pairing.cancel()
 
     @parameterized(
         (PairingDelegate.NO_OUTPUT_NO_INPUT,),
@@ -216,6 +222,8 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
     async def test_classic_pairing(self, ref_io_capability: int) -> None:
         # override reference device IO capability
         setattr(self.ref.device, 'io_capability', ref_io_capability)
+
+        await self.ref.aio.security_storage.DeleteBond(public=self.dut.address)
 
         pairing = asyncio.create_task(self.handle_pairing_events())
         (dut_ref_res, ref_dut_res) = await asyncio.gather(
@@ -261,6 +269,13 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
         # override reference device IO capability
         setattr(self.ref.device, 'io_capability', ref_io_capability)
 
+        ref_address: DeleteBondRequestDict
+        if ref_address_type in (OwnAddressType.PUBLIC, OwnAddressType.RESOLVABLE_OR_PUBLIC):
+            ref_address = {'public': self.ref.address}
+        else:
+            ref_address = {'random': self.ref.random_address}
+
+        await self.dut.aio.security_storage.DeleteBond(**ref_address)
         await self.dut.aio.host.StartAdvertising(
             legacy=True,
             connectable=True,
@@ -270,7 +285,7 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
 
         dut = None
         peers = self.ref.aio.host.Scan(own_address_type=ref_address_type)
-        async for peer in peers:
+        async for peer in aiter(peers):
             if b'pause cafe' in peer.data.manufacturer_specific_data:
                 dut = peer
                 break
@@ -285,7 +300,7 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
 
         pairing = asyncio.create_task(self.handle_pairing_events())
         (dut_ref_res, ref_dut_res) = await asyncio.gather(
-            self.dut.aio.host.WaitLEConnection(),
+            self.dut.aio.host.WaitLEConnection(**ref_address),
             self.ref.aio.host.ConnectLE(**ref_dut_req),
         )
 
