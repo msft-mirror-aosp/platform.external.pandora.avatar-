@@ -17,8 +17,8 @@ import grpc
 import logging
 
 from avatar import PandoraDevices, parameterized
-from avatar.aio import AsyncQueue, asynchronous
-from avatar.pandora_client import Address, BumblePandoraClient, PandoraClient
+from avatar.aio import asynchronous
+from avatar.pandora_client import BumblePandoraClient, PandoraClient
 from bumble.smp import PairingDelegate
 from concurrent import futures
 from contextlib import suppress
@@ -28,8 +28,8 @@ from mobly.asserts import assert_in  # type: ignore
 from mobly.asserts import assert_is_none  # type: ignore
 from mobly.asserts import assert_is_not_none  # type: ignore
 from mobly.asserts import fail  # type: ignore
-from pandora.host_grpc import ConnectLERequestDict, DataTypes, DiscoverabilityMode, OwnAddressType
-from pandora.security_grpc import DeleteBondRequestDict, LESecurityLevel, PairingEventAnswer, SecurityLevel
+from pandora.host_grpc import DataTypes, DiscoverabilityMode, OwnAddressType
+from pandora.security_grpc import LESecurityLevel, PairingEventAnswer, SecurityLevel
 from typing import NoReturn, Optional
 
 
@@ -158,47 +158,41 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
         assert_equal(type(scan_response.data.complete_service_class_uuids16[0]), str)
 
     async def handle_pairing_events(self) -> NoReturn:
-        ref_answer_queue: AsyncQueue[PairingEventAnswer] = AsyncQueue()
-        dut_answer_queue: AsyncQueue[PairingEventAnswer] = AsyncQueue()
-
-        on_ref_pairing = self.ref.aio.security.OnPairing(ref_answer_queue)
-        on_dut_pairing = self.dut.aio.security.OnPairing(dut_answer_queue)
+        ref_pairing_stream = self.ref.aio.security.OnPairing()
+        dut_pairing_stream = self.dut.aio.security.OnPairing()
 
         try:
-            on_ref_pairing_events = aiter(on_ref_pairing)
-            on_dut_pairing_events = aiter(on_dut_pairing)
-
             while True:
                 ref_pairing_event, dut_pairing_event = await asyncio.gather(
-                    anext(on_ref_pairing_events),
-                    anext(on_dut_pairing_events),
+                    anext(ref_pairing_stream),
+                    anext(dut_pairing_stream),
                 )
 
-                if dut_pairing_event.WhichOneof('method') in ('numeric_comparison', 'just_works'):
-                    assert_in(ref_pairing_event.WhichOneof('method'), ('numeric_comparison', 'just_works'))
-                    dut_answer_queue.put_nowait(
+                if dut_pairing_event.method_variant() in ('numeric_comparison', 'just_works'):
+                    assert_in(ref_pairing_event.method_variant(), ('numeric_comparison', 'just_works'))
+                    dut_pairing_stream.send_nowait(
                         PairingEventAnswer(
                             event=dut_pairing_event,
                             confirm=True,
                         )
                     )
-                    ref_answer_queue.put_nowait(
+                    ref_pairing_stream.send_nowait(
                         PairingEventAnswer(
                             event=ref_pairing_event,
                             confirm=True,
                         )
                     )
-                elif dut_pairing_event.WhichOneof('method') == 'passkey_entry_notification':
-                    assert_equal(ref_pairing_event.WhichOneof('method'), 'passkey_entry_request')
-                    ref_answer_queue.put_nowait(
+                elif dut_pairing_event.method_variant() == 'passkey_entry_notification':
+                    assert_equal(ref_pairing_event.method_variant(), 'passkey_entry_request')
+                    ref_pairing_stream.send_nowait(
                         PairingEventAnswer(
                             event=ref_pairing_event,
                             passkey=dut_pairing_event.passkey_entry_notification,
                         )
                     )
-                elif dut_pairing_event.WhichOneof('method') == 'passkey_entry_request':
-                    assert_equal(ref_pairing_event.WhichOneof('method'), 'passkey_entry_notification')
-                    dut_answer_queue.put_nowait(
+                elif dut_pairing_event.method_variant() == 'passkey_entry_request':
+                    assert_equal(ref_pairing_event.method_variant(), 'passkey_entry_notification')
+                    dut_pairing_stream.send_nowait(
                         PairingEventAnswer(
                             event=dut_pairing_event,
                             passkey=ref_pairing_event.passkey_entry_notification,
@@ -208,8 +202,8 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
                     fail("unreachable")
 
         finally:
-            on_ref_pairing.cancel()
-            on_dut_pairing.cancel()
+            ref_pairing_stream.cancel()
+            dut_pairing_stream.cancel()
 
     @parameterized(
         (PairingDelegate.NO_OUTPUT_NO_INPUT,),
@@ -223,16 +217,14 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
         # override reference device IO capability
         setattr(self.ref.device, 'io_capability', ref_io_capability)
 
-        await self.ref.aio.security_storage.DeleteBond(public=self.dut.address)
-
         pairing = asyncio.create_task(self.handle_pairing_events())
         (dut_ref_res, ref_dut_res) = await asyncio.gather(
             self.dut.aio.host.WaitConnection(address=self.ref.address),
             self.ref.aio.host.Connect(address=self.dut.address),
         )
 
-        assert_equal(ref_dut_res.WhichOneof('result'), 'connection')
-        assert_equal(dut_ref_res.WhichOneof('result'), 'connection')
+        assert_equal(ref_dut_res.result_variant(), 'connection')
+        assert_equal(dut_ref_res.result_variant(), 'connection')
         ref_dut = ref_dut_res.connection
         dut_ref = dut_ref_res.connection
         assert ref_dut and dut_ref
@@ -246,8 +238,8 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
         with suppress(asyncio.CancelledError, futures.CancelledError):
             await pairing
 
-        assert_equal(secure.WhichOneof('result'), 'success')
-        assert_equal(wait_security.WhichOneof('result'), 'success')
+        assert_equal(secure.result_variant(), 'success')
+        assert_equal(wait_security.result_variant(), 'success')
 
         await asyncio.gather(
             self.dut.aio.host.Disconnect(connection=dut_ref),
@@ -269,7 +261,6 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
         # override reference device IO capability
         setattr(self.ref.device, 'io_capability', ref_io_capability)
 
-        ref_address: DeleteBondRequestDict
         if ref_address_type in (OwnAddressType.PUBLIC, OwnAddressType.RESOLVABLE_OR_PUBLIC):
             ref_address = {'public': self.ref.address}
         else:
@@ -283,31 +274,18 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
             data=DataTypes(manufacturer_specific_data=b'pause cafe'),
         )
 
-        dut = None
         peers = self.ref.aio.host.Scan(own_address_type=ref_address_type)
-        async for peer in aiter(peers):
-            if b'pause cafe' in peer.data.manufacturer_specific_data:
-                dut = peer
-                break
+        dut = await anext((x async for x in peers if b'pause cafe' in x.data.manufacturer_specific_data))
         peers.cancel()
-        assert_is_not_none(dut)
         assert dut
-        assert dut.address_variant
-        assert dut.address
-
-        ref_dut_req = ConnectLERequestDict(own_address_type=ref_address_type)
-        ref_dut_req[dut.address_variant] = Address(dut.address)
 
         pairing = asyncio.create_task(self.handle_pairing_events())
         (dut_ref_res, ref_dut_res) = await asyncio.gather(
             self.dut.aio.host.WaitLEConnection(**ref_address),
-            self.ref.aio.host.ConnectLE(**ref_dut_req),
+            self.ref.aio.host.ConnectLE(own_address_type=ref_address_type, **dut.address_asdict()),
         )
 
-        assert_equal(ref_dut_res.result_variant, 'connection')
-        assert_equal(dut_ref_res.result_variant, 'connection')
-        ref_dut = ref_dut_res.connection
-        dut_ref = dut_ref_res.connection
+        ref_dut, dut_ref = ref_dut_res.connection, dut_ref_res.connection
         assert ref_dut and dut_ref
 
         (secure, wait_security) = await asyncio.gather(
@@ -319,8 +297,8 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
         with suppress(asyncio.CancelledError, futures.CancelledError):
             await pairing
 
-        assert_equal(secure.WhichOneof('result'), 'success')
-        assert_equal(wait_security.WhichOneof('result'), 'success')
+        assert_equal(secure.result_variant(), 'success')
+        assert_equal(wait_security.result_variant(), 'success')
 
         await asyncio.gather(
             self.dut.aio.host.Disconnect(connection=dut_ref),
