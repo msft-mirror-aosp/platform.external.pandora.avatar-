@@ -27,5 +27,6 @@ python_library_host {
         "pandora-python",
         "libprotobuf-python",
         "bumble",
+        "mobly",
     ],
 }
