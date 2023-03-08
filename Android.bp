@@ -21,11 +21,12 @@ python_library_host {
         "avatar/*.py",
         "avatar/bumble_server/*.py",
         "avatar/controllers/*.py",
+        "avatar/servers/*.py"
     ],
     libs: [
-        "mobly",
         "pandora-python",
         "libprotobuf-python",
         "bumble",
+        "mobly",
     ],
 }
