@@ -20,11 +20,10 @@ import avatar.aio
 import grpc
 import grpc.aio
 import threading
-import time
 import types
 
 from avatar.bumble_device import BumbleDevice
-from avatar.bumble_server import create_serve_task
+from avatar.bumble_server import serve_bumble
 from avatar.controllers import bumble_device, pandora_device
 from avatar.pandora_client import BumblePandoraClient, PandoraClient
 from contextlib import suppress
@@ -82,15 +81,7 @@ class BumblePandoraServer(PandoraServer[BumbleDevice]):
         server = grpc.aio.server()
         port = server.add_insecure_port(f'localhost:{0}')
 
-        self._task = avatar.aio.loop.create_task(
-            avatar.aio.run_until_complete(
-                create_serve_task(
-                    self.device,
-                    grpc_server=server,
-                    port=port,
-                )
-            )
-        )
+        self._task = avatar.aio.loop.create_task(serve_bumble(self.device, grpc_server=server, port=port))
 
         return BumblePandoraClient(f'localhost:{port}', self.device)
 
@@ -99,9 +90,10 @@ class BumblePandoraServer(PandoraServer[BumbleDevice]):
 
         async def server_stop() -> None:
             assert self._task is not None
-            self._task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._task
+            if not self._task.done():
+                self._task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._task
             self._task = None
 
         avatar.aio.run_until_complete(server_stop())
@@ -133,9 +125,6 @@ class AndroidPandoraServer(PandoraServer[AndroidDevice]):
         self._instrumentation.start()
         self.device.adb.forward([f'tcp:{self._port}', f'tcp:{ANDROID_SERVER_GRPC_PORT}'])  # type: ignore
 
-        # wait a few seconds for the Android gRPC server to be started.
-        time.sleep(3)
-
         return PandoraClient(f'localhost:{self._port}')
 
     def stop(self) -> None:
@@ -149,3 +138,4 @@ class AndroidPandoraServer(PandoraServer[AndroidDevice]):
 
         self.device.adb.forward(['--remove', f'tcp:{ANDROID_SERVER_GRPC_PORT}'])  # type: ignore
         self._instrumentation.join()
+        self._instrumentation = None
