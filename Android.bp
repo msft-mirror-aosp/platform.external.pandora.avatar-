@@ -29,4 +29,7 @@ python_library_host {
         "bumble",
         "mobly",
     ],
+    data: [
+        "avatar/py.typed"
+    ]
 }
