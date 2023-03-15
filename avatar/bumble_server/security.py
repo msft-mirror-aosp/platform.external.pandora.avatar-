@@ -18,13 +18,13 @@ import logging
 
 from avatar.bumble_server.utils import BumbleServerLoggerAdapter, address_from_request
 from bumble import hci
-from bumble.core import BT_BR_EDR_TRANSPORT, BT_LE_TRANSPORT, ProtocolError
+from bumble.core import BT_BR_EDR_TRANSPORT, BT_LE_TRANSPORT, BT_PERIPHERAL_ROLE, ProtocolError
 from bumble.device import Connection as BumbleConnection, Device
 from bumble.hci import HCI_Error
 from bumble.smp import PairingConfig, PairingDelegate as BasePairingDelegate
 from contextlib import suppress
-from google.protobuf import any_pb2, empty_pb2, wrappers_pb2
-from google.protobuf.wrappers_pb2 import BoolValue
+from google.protobuf import any_pb2, empty_pb2, wrappers_pb2  # pytype: disable=pyi-error
+from google.protobuf.wrappers_pb2 import BoolValue  # pytype: disable=pyi-error
 from pandora.host_pb2 import Connection
 from pandora.security_grpc_aio import SecurityServicer, SecurityStorageServicer
 from pandora.security_pb2 import (
@@ -90,7 +90,7 @@ class PairingDelegate(BasePairingDelegate):
 
         event = self.add_origin(PairingEvent(just_works=empty_pb2.Empty()))
         self.service.event_queue.put_nowait(event)
-        answer = await anext(self.service.event_answer)
+        answer = await anext(self.service.event_answer)  # pytype: disable=name-error
         assert answer.event == event
         assert answer.confirm
         return answer.confirm
@@ -103,7 +103,7 @@ class PairingDelegate(BasePairingDelegate):
 
         event = self.add_origin(PairingEvent(numeric_comparison=number))
         self.service.event_queue.put_nowait(event)
-        answer = await anext(self.service.event_answer)
+        answer = await anext(self.service.event_answer)  # pytype: disable=name-error
         assert answer.event == event
         assert answer.confirm
         return answer.confirm
@@ -116,7 +116,7 @@ class PairingDelegate(BasePairingDelegate):
 
         event = self.add_origin(PairingEvent(passkey_entry_request=empty_pb2.Empty()))
         self.service.event_queue.put_nowait(event)
-        answer = await anext(self.service.event_answer)
+        answer = await anext(self.service.event_answer)  # pytype: disable=name-error
         assert answer.event == event
         assert answer.passkey is not None
         return answer.passkey
@@ -216,7 +216,18 @@ class SecurityService(SecurityServicer):
         if self.need_pairing(connection, level):
             try:
                 self.log.info('Pair...')
-                await connection.pair()
+
+                if connection.transport == BT_LE_TRANSPORT and connection.role == BT_PERIPHERAL_ROLE:
+                    wait_for_security: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+                    connection.on("pairing", lambda *_: wait_for_security.set_result(True))  # type: ignore
+                    connection.on("pairing_failure", wait_for_security.set_exception)
+
+                    connection.request_pairing()
+
+                    await wait_for_security
+                else:
+                    await connection.pair()
+
                 self.log.info('Paired')
             except asyncio.CancelledError:
                 self.log.warning(f"Connection died during encryption")
@@ -382,6 +393,7 @@ class SecurityService(SecurityServicer):
         return level >= LEVEL2 and not connection.authenticated
 
     def need_encryption(self, connection: BumbleConnection, level: int) -> bool:
+        # TODO(abel): need to support MITM
         if connection.transport == BT_LE_TRANSPORT:
             return level == LE_LEVEL2 and not connection.encryption
         return level >= LEVEL2 and not connection.encryption
