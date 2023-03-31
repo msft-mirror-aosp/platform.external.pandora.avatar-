@@ -110,11 +110,12 @@ class PandoraClient:
                 )
                 return
             except grpc.aio.AioRpcError as e:
-                if attempts <= max_attempts and e.code() == grpc.StatusCode.UNAVAILABLE:
-                    self.log.debug(f'Server unavailable, retry [{attempts}/{max_attempts}].')
-                    attempts += 1
-                    continue
-                self.log.exception(f'Server still unavailable after {attempts} attempts, abort.')
+                if e.code() in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.DEADLINE_EXCEEDED):
+                    if attempts <= max_attempts:
+                        self.log.debug(f'Server unavailable, retry [{attempts}/{max_attempts}].')
+                        attempts += 1
+                        continue
+                    self.log.exception(f'Server still unavailable after {attempts} attempts, abort.')
                 raise e
 
     @property
@@ -144,9 +145,9 @@ class PandoraClient:
         return security_grpc.SecurityStorage(self.channel)
 
     @property
-    def asha(self) -> asha_grpc.ASHA:
+    def asha(self) -> asha_grpc.Asha:
         """Returns the Pandora ASHA gRPC interface."""
-        return asha_grpc.ASHA(self.channel)
+        return asha_grpc.Asha(self.channel)
 
     @dataclass
     class Aio:
@@ -168,9 +169,9 @@ class PandoraClient:
             return security_grpc_aio.SecurityStorage(self.channel)
 
         @property
-        def asha(self) -> asha_grpc_aio.ASHA:
+        def asha(self) -> asha_grpc_aio.Asha:
             """Returns the Pandora ASHA gRPC interface."""
-            return asha_grpc_aio.ASHA(self.channel)
+            return asha_grpc_aio.Asha(self.channel)
 
     @property
     def aio(self) -> 'PandoraClient.Aio':
