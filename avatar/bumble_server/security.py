@@ -85,46 +85,67 @@ class PairingDelegate(BasePairingDelegate):
     async def confirm(self) -> bool:
         self.log.info(f"Pairing event: `just_works` (io_capability: {self.io_capability})")
 
-        if not self.service.event_queue or not self.service.event_answer:
+        if self.service.event_queue is None or self.service.event_answer is None:
             return True
 
         event = self.add_origin(PairingEvent(just_works=empty_pb2.Empty()))
         self.service.event_queue.put_nowait(event)
         answer = await anext(self.service.event_answer)  # pytype: disable=name-error
         assert answer.event == event
-        assert answer.confirm
+        assert answer.answer_variant() == 'confirm' and answer.confirm is not None
         return answer.confirm
 
     async def compare_numbers(self, number: int, digits: int = 6) -> bool:
         self.log.info(f"Pairing event: `numeric_comparison` (io_capability: {self.io_capability})")
 
-        if not self.service.event_queue or not self.service.event_answer:
+        if self.service.event_queue is None or self.service.event_answer is None:
             raise RuntimeError('security: unhandled number comparison request')
 
         event = self.add_origin(PairingEvent(numeric_comparison=number))
         self.service.event_queue.put_nowait(event)
         answer = await anext(self.service.event_answer)  # pytype: disable=name-error
         assert answer.event == event
-        assert answer.confirm
+        assert answer.answer_variant() == 'confirm' and answer.confirm is not None
         return answer.confirm
 
-    async def get_number(self) -> int:
+    async def get_number(self) -> Optional[int]:
         self.log.info(f"Pairing event: `passkey_entry_request` (io_capability: {self.io_capability})")
 
-        if not self.service.event_queue or not self.service.event_answer:
+        if self.service.event_queue is None or self.service.event_answer is None:
             raise RuntimeError('security: unhandled number request')
 
         event = self.add_origin(PairingEvent(passkey_entry_request=empty_pb2.Empty()))
         self.service.event_queue.put_nowait(event)
         answer = await anext(self.service.event_answer)  # pytype: disable=name-error
         assert answer.event == event
-        assert answer.passkey is not None
+        assert answer.answer_variant() == 'passkey'
         return answer.passkey
+
+    async def get_string(self, max_length: int) -> Optional[str]:
+        self.log.info(f"Pairing event: `pin_code_request` (io_capability: {self.io_capability})")
+
+        if self.service.event_queue is None or self.service.event_answer is None:
+            raise RuntimeError('security: unhandled pin_code request')
+
+        event = self.add_origin(PairingEvent(pin_code_request=empty_pb2.Empty()))
+        self.service.event_queue.put_nowait(event)
+        answer = await anext(self.service.event_answer)  # pytype: disable=name-error
+        assert answer.event == event
+        assert answer.answer_variant() == 'pin'
+
+        if answer.pin is None:
+            return None
+
+        pin = answer.pin.decode('utf-8')
+        if not pin or len(pin) > max_length:
+            raise ValueError(f'Pin must be utf-8 encoded up to {max_length} bytes')
+
+        return pin
 
     async def display_number(self, number: int, digits: int = 6) -> None:
         self.log.info(f"Pairing event: `passkey_entry_notification` (io_capability: {self.io_capability})")
 
-        if not self.service.event_queue:
+        if self.service.event_queue is None:
             raise RuntimeError('security: unhandled number display request')
 
         event = self.add_origin(PairingEvent(passkey_entry_notification=number))
@@ -181,7 +202,7 @@ class SecurityService(SecurityServicer):
     ) -> AsyncGenerator[PairingEvent, None]:
         self.log.info('OnPairing')
 
-        if self.event_queue:
+        if self.event_queue is not None:
             raise RuntimeError('already streaming pairing events')
 
         if len(self.device.connections):
