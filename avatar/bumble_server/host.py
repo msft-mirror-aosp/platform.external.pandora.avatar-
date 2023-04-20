@@ -76,7 +76,13 @@ from pandora.host_pb2 import (
 )
 from typing import AsyncGenerator, Dict, List, Optional, Set, Tuple, cast
 
-PRIMARY_PHY_MAP: Dict[int, PrimaryPhy] = {1: PRIMARY_1M, 3: PRIMARY_CODED}
+PRIMARY_PHY_MAP: Dict[int, PrimaryPhy] = {
+    # Default value reported by Bumble for legacy Advertising reports.
+    # FIXME(uael): `None` might be a better value, but Bumble need to change accordingly.
+    0: PRIMARY_1M,
+    1: PRIMARY_1M,
+    3: PRIMARY_CODED,
+}
 
 SECONDARY_PHY_MAP: Dict[int, SecondaryPhy] = {
     0: SECONDARY_NONE,
@@ -514,14 +520,14 @@ class HostService(HostServicer):
             ad_structures.append(
                 (
                     AdvertisingData.INCOMPLETE_LIST_OF_128_BIT_SERVICE_CLASS_UUIDS,
-                    b''.join([uuid128_from_str(uuid) for uuid in uuids])
+                    b''.join([uuid128_from_str(uuid) for uuid in uuids]),
                 )
             )
         if uuids := dt.complete_service_class_uuids128:
             ad_structures.append(
                 (
                     AdvertisingData.COMPLETE_LIST_OF_128_BIT_SERVICE_CLASS_UUIDS,
-                    b''.join([uuid128_from_str(uuid) for uuid in uuids])
+                    b''.join([uuid128_from_str(uuid) for uuid in uuids]),
                 )
             )
         if dt.HasField('include_shortened_local_name'):
@@ -577,7 +583,7 @@ class HostService(HostServicer):
             ad_structures.append(
                 (
                     AdvertisingData.LIST_OF_128_BIT_SERVICE_SOLICITATION_UUIDS,
-                    b''.join([uuid128_from_str(uuid) for uuid in uuids])
+                    b''.join([uuid128_from_str(uuid) for uuid in uuids]),
                 )
             )
         if datas := dt.service_data_uuid16:
