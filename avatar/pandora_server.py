@@ -20,7 +20,6 @@ import avatar.aio
 import grpc
 import grpc.aio
 import threading
-import time
 import types
 
 from avatar.bumble_device import BumbleDevice
@@ -65,7 +64,7 @@ class PandoraServer(Generic[TDevice]):
 
 
 class BumblePandoraServer(PandoraServer[BumbleDevice]):
-    """Manages the Pandora gRPC server on an BumbleDevice."""
+    """Manages the Pandora gRPC server on a BumbleDevice."""
 
     MOBLY_CONTROLLER_MODULE = bumble_device
 
@@ -91,9 +90,10 @@ class BumblePandoraServer(PandoraServer[BumbleDevice]):
 
         async def server_stop() -> None:
             assert self._task is not None
-            self._task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._task
+            if not self._task.done():
+                self._task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._task
             self._task = None
 
         avatar.aio.run_until_complete(server_stop())
@@ -125,10 +125,7 @@ class AndroidPandoraServer(PandoraServer[AndroidDevice]):
         self._instrumentation.start()
         self.device.adb.forward([f'tcp:{self._port}', f'tcp:{ANDROID_SERVER_GRPC_PORT}'])  # type: ignore
 
-        # wait a few seconds for the Android gRPC server to be started.
-        time.sleep(3)
-
-        return PandoraClient(f'localhost:{self._port}')
+        return PandoraClient(f'localhost:{self._port}', 'android')
 
     def stop(self) -> None:
         """Stops and cleans up the Pandora server on the Android device."""
@@ -141,3 +138,4 @@ class AndroidPandoraServer(PandoraServer[AndroidDevice]):
 
         self.device.adb.forward(['--remove', f'tcp:{ANDROID_SERVER_GRPC_PORT}'])  # type: ignore
         self._instrumentation.join()
+        self._instrumentation = None
