@@ -19,38 +19,16 @@ python_library_host {
     name: "libavatar",
     srcs: [
         "avatar/*.py",
-        "avatar/bumble_server/*.py",
         "avatar/controllers/*.py",
-        "avatar/servers/*.py"
     ],
     libs: [
         "pandora-python",
         "libprotobuf-python",
         "bumble",
+        "bumble-pandora",
         "mobly",
     ],
     data: [
         "avatar/py.typed"
-    ]
-}
-
-python_test_host {
-    name: "bumble_pandora_server",
-    main: "avatar/bumble_server/__init__.py",
-    srcs: [
-        "avatar/bumble_server/*.py",
-        "avatar/bumble_device.py",
-    ],
-    libs: [
-        "bumble",
-        "pandora-python",
-    ],
-
-    test_options: {
-        unit_test: false,
-    },
-
-    test_suites: [
-        "general-tests"
     ]
 }
