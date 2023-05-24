@@ -32,8 +32,3 @@ python_library_host {
         "avatar/py.typed"
     ]
 }
-
-filegroup {
-    name: "avatar-cases",
-    srcs: ["cases/*.py"],
-}
