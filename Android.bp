@@ -49,4 +49,8 @@ python_test_host {
     test_options: {
         unit_test: false,
     },
+
+    test_suites: [
+        "general-tests"
+    ]
 }
