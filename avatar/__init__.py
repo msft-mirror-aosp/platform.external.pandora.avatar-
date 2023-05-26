@@ -20,14 +20,28 @@ any Bluetooth test cases virtually and physically.
 __version__ = "0.0.1"
 
 import functools
+import grpc
+import grpc.aio
 import importlib
 import logging
 
 from avatar import pandora_server
-from avatar.pandora_client import PandoraClient
+from avatar.aio import asynchronous
+from avatar.pandora_client import BumblePandoraClient as BumblePandoraDevice, PandoraClient as PandoraDevice
 from avatar.pandora_server import PandoraServer
 from mobly import base_test
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Sized, Tuple, Type
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Sized, Tuple, Type, TypeVar
+
+# public symbols
+__all__ = [
+    'asynchronous',
+    'parameterized',
+    'rpc_except',
+    'PandoraDevices',
+    'PandoraDevice',
+    'BumblePandoraDevice',
+]
+
 
 PANDORA_COMMON_SERVER_CLASSES: Dict[str, Type[pandora_server.PandoraServer[Any]]] = {
     'PandoraDevice': pandora_server.PandoraServer,
@@ -38,11 +52,11 @@ PANDORA_COMMON_SERVER_CLASSES: Dict[str, Type[pandora_server.PandoraServer[Any]]
 KEY_PANDORA_SERVER_CLASS = 'pandora_server_class'
 
 
-class PandoraDevices(Sized, Iterable[PandoraClient]):
+class PandoraDevices(Sized, Iterable[PandoraDevice]):
     """Utility for abstracting controller registration and Pandora setup."""
 
     _test: base_test.BaseTestClass
-    _clients: List[PandoraClient]
+    _clients: List[PandoraDevice]
     _servers: List[PandoraServer[Any]]
 
     def __init__(self, test: base_test.BaseTestClass) -> None:
@@ -98,7 +112,7 @@ class PandoraDevices(Sized, Iterable[PandoraClient]):
     def __len__(self) -> int:
         return len(self._clients)
 
-    def __iter__(self) -> Iterator[PandoraClient]:
+    def __iter__(self) -> Iterator[PandoraDevice]:
         return iter(self._clients)
 
     def start_all(self) -> None:
@@ -162,6 +176,30 @@ def parameterized(*inputs: Tuple[Any, ...]) -> Type[Wrapper]:
 
                 # we need to pass `input` here, otherwise it will be set to the value
                 # from the last iteration of `inputs`
-                setattr(owner, f"{name}{input}", decorate(input))
+                setattr(owner, f"{name}{input}".replace(' ', ''), decorate(input))
+            delattr(owner, name)
 
     return wrapper
+
+
+_T = TypeVar('_T')
+
+
+# Decorate a test function with a wrapper that catch gRPC errors
+# and call a callback if the status `code` match.
+def rpc_except(
+    excepts: Dict[grpc.StatusCode, Callable[[grpc.aio.AioRpcError], Any]],
+) -> Callable[[Callable[..., _T]], Callable[..., _T]]:
+    def wrap(func: Callable[..., _T]) -> Callable[..., _T]:
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> _T:
+            try:
+                return func(*args, **kwargs)
+            except (grpc.RpcError, grpc.aio.AioRpcError) as e:
+                if f := excepts.get(e.code(), None):  # type: ignore
+                    return f(e)  # type: ignore
+                raise e
+
+        return wrapper
+
+    return wrap

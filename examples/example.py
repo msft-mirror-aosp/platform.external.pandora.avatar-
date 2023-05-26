@@ -13,23 +13,31 @@
 # limitations under the License.
 
 import asyncio
+import avatar
 import grpc
 import logging
 
-from avatar import PandoraDevices, parameterized
-from avatar.aio import asynchronous
-from avatar.pandora_client import BumblePandoraClient, PandoraClient
+from avatar import BumblePandoraDevice, PandoraDevice, PandoraDevices
 from bumble.smp import PairingDelegate
 from concurrent import futures
 from contextlib import suppress
-from mobly import base_test, test_runner
+from mobly import base_test, signals, test_runner
 from mobly.asserts import assert_equal  # type: ignore
 from mobly.asserts import assert_in  # type: ignore
 from mobly.asserts import assert_is_none  # type: ignore
 from mobly.asserts import assert_is_not_none  # type: ignore
-from mobly.asserts import fail  # type: ignore
-from pandora.host_grpc import DataTypes, DiscoverabilityMode, OwnAddressType
-from pandora.security_grpc import LESecurityLevel, PairingEventAnswer, SecurityLevel
+from mobly.asserts import explicit_pass, fail  # type: ignore
+from pandora.host_pb2 import (
+    DISCOVERABLE_GENERAL,
+    DISCOVERABLE_LIMITED,
+    NOT_DISCOVERABLE,
+    PUBLIC,
+    RANDOM,
+    DataTypes,
+    DiscoverabilityMode,
+    OwnAddressType,
+)
+from pandora.security_pb2 import LE_LEVEL3, LEVEL2, PairingEventAnswer
 from typing import NoReturn, Optional
 
 
@@ -37,21 +45,24 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
     devices: Optional[PandoraDevices] = None
 
     # pandora devices.
-    dut: PandoraClient
-    ref: BumblePandoraClient
+    dut: PandoraDevice
+    ref: PandoraDevice
 
     def setup_class(self) -> None:
         self.devices = PandoraDevices(self)
-        dut, ref = self.devices
-        assert isinstance(ref, BumblePandoraClient)
-        self.dut, self.ref = dut, ref
+        self.dut, self.ref, *_ = self.devices
+
+        # Enable BR/EDR mode for Bumble devices.
+        for device in self.devices:
+            if isinstance(device, BumblePandoraDevice):
+                device.config.setdefault('classic_enabled', True)
 
     def teardown_class(self) -> None:
         if self.devices:
             self.devices.stop_all()
 
-    @asynchronous
-    async def setup_test(self) -> None:
+    @avatar.asynchronous
+    async def setup_test(self) -> None:  # pytype: disable=wrong-arg-types
         await asyncio.gather(self.dut.reset(), self.ref.reset())
 
     def test_print_addresses(self) -> None:
@@ -72,14 +83,17 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
     # run it multiple time with different parameters.
     # Here we check that no matter the address type we use for both sides
     # the connection still complete.
-    @parameterized(
-        (OwnAddressType.RANDOM, OwnAddressType.RANDOM),
-        (OwnAddressType.RANDOM, OwnAddressType.PUBLIC),
+    @avatar.parameterized(
+        (RANDOM, RANDOM),
+        (RANDOM, PUBLIC),
     )  # type: ignore[misc]
     def test_le_connect(self, dut_address_type: OwnAddressType, ref_address_type: OwnAddressType) -> None:
+        if not isinstance(self.ref, BumblePandoraDevice):
+            raise signals.TestSkip('Test require Bumble as reference device')
+
         advertisement = self.ref.host.Advertise(legacy=True, connectable=True, own_address_type=ref_address_type)
         scan = self.dut.host.Scan(own_address_type=dut_address_type)
-        if ref_address_type == OwnAddressType.PUBLIC:
+        if ref_address_type == PUBLIC:
             scan_response = next((x for x in scan if x.public == self.ref.address))
             dut_ref = self.dut.host.ConnectLE(
                 public=scan_response.public,
@@ -97,20 +111,23 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
         assert dut_ref and ref_dut
         self.dut.host.Disconnect(connection=dut_ref)
 
+    @avatar.rpc_except(
+        {
+            # This test should reach the `Inquiry` timeout.
+            grpc.StatusCode.DEADLINE_EXCEEDED: lambda e: explicit_pass(e.details()),
+        }
+    )
     def test_not_discoverable(self) -> None:
-        self.dut.host.SetDiscoverabilityMode(mode=DiscoverabilityMode.NOT_DISCOVERABLE)
+        self.dut.host.SetDiscoverabilityMode(mode=NOT_DISCOVERABLE)
         inquiry = self.ref.host.Inquiry(timeout=3.0)
         try:
             assert_is_none(next((x for x in inquiry if x.address == self.dut.address), None))
-        except grpc.RpcError as e:
-            # No peers found; StartInquiry times out
-            assert_equal(e.code(), grpc.StatusCode.DEADLINE_EXCEEDED)  # type: ignore
         finally:
             inquiry.cancel()
 
-    @parameterized(
-        (DiscoverabilityMode.DISCOVERABLE_LIMITED,),
-        (DiscoverabilityMode.DISCOVERABLE_GENERAL,),
+    @avatar.parameterized(
+        (DISCOVERABLE_LIMITED,),
+        (DISCOVERABLE_GENERAL,),
     )  # type: ignore[misc]
     def test_discoverable(self, mode: DiscoverabilityMode) -> None:
         self.dut.host.SetDiscoverabilityMode(mode=mode)
@@ -120,8 +137,8 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
         finally:
             inquiry.cancel()
 
-    @asynchronous
-    async def test_wait_connection(self) -> None:
+    @avatar.asynchronous
+    async def test_wait_connection(self) -> None:  # pytype: disable=wrong-arg-types
         dut_ref_co = self.dut.aio.host.WaitConnection(address=self.ref.address)
         ref_dut = await self.ref.aio.host.Connect(address=self.dut.address)
         dut_ref = await dut_ref_co
@@ -157,8 +174,8 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
         try:
             while True:
                 ref_pairing_event, dut_pairing_event = await asyncio.gather(
-                    anext(ref_pairing_stream),
-                    anext(dut_pairing_stream),
+                    anext(ref_pairing_stream),  # pytype: disable=name-error
+                    anext(dut_pairing_stream),  # pytype: disable=name-error
                 )
 
                 if dut_pairing_event.method_variant() in ('numeric_comparison', 'just_works'):
@@ -198,15 +215,18 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
             ref_pairing_stream.cancel()
             dut_pairing_stream.cancel()
 
-    @parameterized(
+    @avatar.parameterized(
         (PairingDelegate.NO_OUTPUT_NO_INPUT,),
         (PairingDelegate.KEYBOARD_INPUT_ONLY,),
         (PairingDelegate.DISPLAY_OUTPUT_ONLY,),
         (PairingDelegate.DISPLAY_OUTPUT_AND_YES_NO_INPUT,),
         (PairingDelegate.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT,),
     )  # type: ignore[misc]
-    @asynchronous
-    async def test_classic_pairing(self, ref_io_capability: int) -> None:
+    @avatar.asynchronous
+    async def test_classic_pairing(self, ref_io_capability: int) -> None:  # pytype: disable=wrong-arg-types
+        if not isinstance(self.ref, BumblePandoraDevice):
+            raise signals.TestSkip('Test require Bumble as reference device(s)')
+
         # override reference device IO capability
         setattr(self.ref.device, 'io_capability', ref_io_capability)
 
@@ -223,8 +243,8 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
         assert ref_dut and dut_ref
 
         (secure, wait_security) = await asyncio.gather(
-            self.ref.aio.security.Secure(connection=ref_dut, classic=SecurityLevel.LEVEL2),
-            self.dut.aio.security.WaitSecurity(connection=dut_ref, classic=SecurityLevel.LEVEL2),
+            self.ref.aio.security.Secure(connection=ref_dut, classic=LEVEL2),
+            self.dut.aio.security.WaitSecurity(connection=dut_ref, classic=LEVEL2),
         )
 
         pairing.cancel()
@@ -239,18 +259,21 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
             self.ref.aio.host.WaitDisconnection(connection=ref_dut),
         )
 
-    @parameterized(
-        (OwnAddressType.RANDOM, OwnAddressType.RANDOM, PairingDelegate.NO_OUTPUT_NO_INPUT),
-        (OwnAddressType.RANDOM, OwnAddressType.RANDOM, PairingDelegate.KEYBOARD_INPUT_ONLY),
-        (OwnAddressType.RANDOM, OwnAddressType.RANDOM, PairingDelegate.DISPLAY_OUTPUT_ONLY),
-        (OwnAddressType.RANDOM, OwnAddressType.RANDOM, PairingDelegate.DISPLAY_OUTPUT_AND_YES_NO_INPUT),
-        (OwnAddressType.RANDOM, OwnAddressType.RANDOM, PairingDelegate.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT),
-        (OwnAddressType.RANDOM, OwnAddressType.PUBLIC, PairingDelegate.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT),
+    @avatar.parameterized(
+        (RANDOM, RANDOM, PairingDelegate.NO_OUTPUT_NO_INPUT),
+        (RANDOM, RANDOM, PairingDelegate.KEYBOARD_INPUT_ONLY),
+        (RANDOM, RANDOM, PairingDelegate.DISPLAY_OUTPUT_ONLY),
+        (RANDOM, RANDOM, PairingDelegate.DISPLAY_OUTPUT_AND_YES_NO_INPUT),
+        (RANDOM, RANDOM, PairingDelegate.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT),
+        (RANDOM, PUBLIC, PairingDelegate.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT),
     )  # type: ignore[misc]
-    @asynchronous
-    async def test_le_pairing(
+    @avatar.asynchronous
+    async def test_le_pairing(  # pytype: disable=wrong-arg-types
         self, dut_address_type: OwnAddressType, ref_address_type: OwnAddressType, ref_io_capability: int
     ) -> None:
+        if not isinstance(self.ref, BumblePandoraDevice):
+            raise signals.TestSkip('Test require Bumble as reference device(s)')
+
         # override reference device IO capability
         setattr(self.ref.device, 'io_capability', ref_io_capability)
 
@@ -262,14 +285,16 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
         )
 
         scan = self.ref.aio.host.Scan(own_address_type=ref_address_type)
-        dut = await anext((x async for x in scan if b'pause cafe' in x.data.manufacturer_specific_data))
+        dut = await anext(
+            (x async for x in scan if b'pause cafe' in x.data.manufacturer_specific_data)
+        )  # pytype: disable=name-error
         scan.cancel()
         assert dut
 
         pairing = asyncio.create_task(self.handle_pairing_events())
         (ref_dut_res, dut_ref_res) = await asyncio.gather(
             self.ref.aio.host.ConnectLE(own_address_type=ref_address_type, **dut.address_asdict()),
-            anext(aiter(advertisement)),
+            anext(aiter(advertisement)),  # pytype: disable=name-error
         )
 
         advertisement.cancel()
@@ -277,8 +302,8 @@ class ExampleTest(base_test.BaseTestClass):  # type: ignore[misc]
         assert ref_dut and dut_ref
 
         (secure, wait_security) = await asyncio.gather(
-            self.ref.aio.security.Secure(connection=ref_dut, le=LESecurityLevel.LE_LEVEL3),
-            self.dut.aio.security.WaitSecurity(connection=dut_ref, le=LESecurityLevel.LE_LEVEL3),
+            self.ref.aio.security.Secure(connection=ref_dut, le=LE_LEVEL3),
+            self.dut.aio.security.WaitSecurity(connection=dut_ref, le=LE_LEVEL3),
         )
 
         pairing.cancel()
