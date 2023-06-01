@@ -23,8 +23,9 @@ import grpc
 import grpc.aio
 import logging
 
-from avatar.bumble_device import BumbleDevice
+from bumble import pandora as bumble_server
 from bumble.hci import Address as BumbleAddress
+from bumble.pandora.device import PandoraDevice as BumblePandoraDevice
 from dataclasses import dataclass
 from pandora import host_grpc, host_grpc_aio, security_grpc, security_grpc_aio
 from typing import Any, Dict, MutableMapping, Optional, Tuple, Union
@@ -54,6 +55,7 @@ class PandoraClient:
     """Provides Pandora interface access to a device via gRPC."""
 
     # public fields
+    name: str
     grpc_target: str  # Server address for the gRPC channel.
     log: 'PandoraClientLoggerAdapter'  # Logger adapter.
 
@@ -70,8 +72,9 @@ class PandoraClient:
         Args:
           grpc_target: Server address for the gRPC channel.
         """
+        self.name = name
         self.grpc_target = grpc_target
-        self.log = PandoraClientLoggerAdapter(logging.getLogger(), {'client': self, 'client_name': name})
+        self.log = PandoraClientLoggerAdapter(logging.getLogger(), {'client': self})
         self._channel = grpc.insecure_channel(grpc_target)  # type: ignore
         self._address = Address(b'\x00\x00\x00\x00\x00\x00')
         self._aio = None
@@ -177,19 +180,24 @@ class PandoraClientLoggerAdapter(logging.LoggerAdapter):  # type: ignore
         assert self.extra
         client = self.extra['client']
         assert isinstance(client, PandoraClient)
-        client_name = self.extra.get('client_name', client.__class__.__name__)
         addr = ':'.join([f'{x:02X}' for x in client.address[4:]])
-        return (f'[{client_name}:{addr}] {msg}', kwargs)
+        return (f'[{client.name}:{addr}] {msg}', kwargs)
 
 
 class BumblePandoraClient(PandoraClient):
     """Special Pandora client which also give access to a Bumble device instance."""
 
-    _bumble: BumbleDevice  # Bumble device wrapper.
+    _bumble: BumblePandoraDevice  # Bumble device wrapper.
+    _server_config: bumble_server.Config  # Bumble server config.
 
-    def __init__(self, grpc_target: str, bumble: BumbleDevice) -> None:
+    def __init__(self, grpc_target: str, bumble: BumblePandoraDevice, server_config: bumble_server.Config) -> None:
         super().__init__(grpc_target, 'bumble')
         self._bumble = bumble
+        self._server_config = server_config
+
+    @property
+    def server_config(self) -> bumble_server.Config:
+        return self._server_config
 
     @property
     def config(self) -> Dict[str, Any]:

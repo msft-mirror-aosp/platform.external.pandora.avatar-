@@ -22,10 +22,10 @@ import grpc.aio
 import threading
 import types
 
-from avatar.bumble_device import BumbleDevice
-from avatar.bumble_server import serve_bumble
 from avatar.controllers import bumble_device, pandora_device
 from avatar.pandora_client import BumblePandoraClient, PandoraClient
+from bumble import pandora as bumble_server
+from bumble.pandora.device import PandoraDevice as BumblePandoraDevice
 from contextlib import suppress
 from mobly.controllers import android_device
 from mobly.controllers.android_device import AndroidDevice
@@ -63,7 +63,7 @@ class PandoraServer(Generic[TDevice]):
         """Stops and cleans up the Pandora server on the device."""
 
 
-class BumblePandoraServer(PandoraServer[BumbleDevice]):
+class BumblePandoraServer(PandoraServer[BumblePandoraDevice]):
     """Manages the Pandora gRPC server on a BumbleDevice."""
 
     MOBLY_CONTROLLER_MODULE = bumble_device
@@ -81,9 +81,12 @@ class BumblePandoraServer(PandoraServer[BumbleDevice]):
         server = grpc.aio.server()
         port = server.add_insecure_port(f'localhost:{0}')
 
-        self._task = avatar.aio.loop.create_task(serve_bumble(self.device, grpc_server=server, port=port))
+        config = bumble_server.Config()
+        self._task = avatar.aio.loop.create_task(
+            bumble_server.serve(self.device, config=config, grpc_server=server, port=port)
+        )
 
-        return BumblePandoraClient(f'localhost:{port}', self.device)
+        return BumblePandoraClient(f'localhost:{port}', self.device, config)
 
     def stop(self) -> None:
         """Stops and cleans up the Pandora server on the Bumble device."""
