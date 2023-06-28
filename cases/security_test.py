@@ -135,6 +135,12 @@ class SecurityTest(base_test.BaseTestClass):  # type: ignore[misc]
                 + 'Android does not seems to react correctly against pairing reject from KEYBOARD_ONLY devices.'
             )
 
+        if self.dut.name == 'android' and pair == 'outgoing_pairing' and ref_role == 'against_central':
+            raise signals.TestSkip(
+                'TODO: Fix PandoraSecurity server for android:\n'
+                + 'report the encryption state the with the bonding state'
+            )
+
         if isinstance(self.ref, BumblePandoraDevice) and ref_io_capability == 'against_default_io_cap':
             raise signals.TestSkip('Skip default IO cap for Bumble REF.')
 
@@ -232,7 +238,6 @@ class SecurityTest(base_test.BaseTestClass):  # type: ignore[misc]
 
             dut_ev_answer, ref_ev_answer = None, None
             if not connect_and_pair_task.done():
-
                 dut_ev = await asyncio.wait_for(dut_pairing_fut, timeout=15.0)
                 self.dut.log.info(f'DUT pairing event: {dut_ev.method_variant()}')
 
@@ -247,7 +252,9 @@ class SecurityTest(base_test.BaseTestClass):  # type: ignore[misc]
                         confirm = ref_ev.numeric_comparison == dut_ev.numeric_comparison
 
                     dut_ev_answer = PairingEventAnswer(event=dut_ev, confirm=False if variant == 'reject' else confirm)
-                    ref_ev_answer = PairingEventAnswer(event=ref_ev, confirm=False if variant == 'rejected' else confirm)
+                    ref_ev_answer = PairingEventAnswer(
+                        event=ref_ev, confirm=False if variant == 'rejected' else confirm
+                    )
 
                 elif dut_ev.method_variant() == 'passkey_entry_notification':
                     assert_equal(ref_ev.method_variant(), 'passkey_entry_request')
@@ -316,7 +323,6 @@ class SecurityTest(base_test.BaseTestClass):  # type: ignore[misc]
                 connect_and_pair_task.cancel()
 
         finally:
-
             try:
                 (secure, wait_security) = await asyncio.wait_for(connect_and_pair_task, 15.0)
                 logging.info(f'Pairing result: {secure.result_variant()}/{wait_security.result_variant()}')
