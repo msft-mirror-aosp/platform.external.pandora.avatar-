@@ -19,21 +19,21 @@ import asyncio
 import avatar.aio
 import grpc
 import grpc.aio
+import portpicker
 import threading
-import time
 import types
 
-from avatar.bumble_device import BumbleDevice
-from avatar.bumble_server import serve_bumble
 from avatar.controllers import bumble_device, pandora_device
 from avatar.pandora_client import BumblePandoraClient, PandoraClient
+from bumble import pandora as bumble_server
+from bumble.pandora.device import PandoraDevice as BumblePandoraDevice
 from contextlib import suppress
 from mobly.controllers import android_device
 from mobly.controllers.android_device import AndroidDevice
 from typing import Generic, Optional, TypeVar
 
 ANDROID_SERVER_PACKAGE = 'com.android.pandora'
-ANDROID_SERVER_GRPC_PORT = 8999  # TODO: Use a dynamic port
+ANDROID_SERVER_GRPC_PORT = 8999
 
 
 # Generic type for `PandoraServer`.
@@ -64,8 +64,8 @@ class PandoraServer(Generic[TDevice]):
         """Stops and cleans up the Pandora server on the device."""
 
 
-class BumblePandoraServer(PandoraServer[BumbleDevice]):
-    """Manages the Pandora gRPC server on an BumbleDevice."""
+class BumblePandoraServer(PandoraServer[BumblePandoraDevice]):
+    """Manages the Pandora gRPC server on a BumbleDevice."""
 
     MOBLY_CONTROLLER_MODULE = bumble_device
 
@@ -82,18 +82,22 @@ class BumblePandoraServer(PandoraServer[BumbleDevice]):
         server = grpc.aio.server()
         port = server.add_insecure_port(f'localhost:{0}')
 
-        self._task = avatar.aio.loop.create_task(serve_bumble(self.device, grpc_server=server, port=port))
+        config = bumble_server.Config()
+        self._task = avatar.aio.loop.create_task(
+            bumble_server.serve(self.device, config=config, grpc_server=server, port=port)
+        )
 
-        return BumblePandoraClient(f'localhost:{port}', self.device)
+        return BumblePandoraClient(f'localhost:{port}', self.device, config)
 
     def stop(self) -> None:
         """Stops and cleans up the Pandora server on the Bumble device."""
 
         async def server_stop() -> None:
             assert self._task is not None
-            self._task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._task
+            if not self._task.done():
+                self._task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._task
             self._task = None
 
         avatar.aio.run_until_complete(server_stop())
@@ -105,13 +109,14 @@ class AndroidPandoraServer(PandoraServer[AndroidDevice]):
     MOBLY_CONTROLLER_MODULE = android_device
 
     _instrumentation: Optional[threading.Thread] = None
-    _port: int = ANDROID_SERVER_GRPC_PORT
+    _port: int
 
     def start(self) -> PandoraClient:
         """Sets up and starts the Pandora server on the Android device."""
         assert self._instrumentation is None
 
         # start Pandora Android gRPC server.
+        self._port = portpicker.pick_unused_port()  # type: ignore
         self._instrumentation = threading.Thread(
             target=lambda: self.device.adb._exec_adb_cmd(  # type: ignore
                 'shell',
@@ -125,10 +130,7 @@ class AndroidPandoraServer(PandoraServer[AndroidDevice]):
         self._instrumentation.start()
         self.device.adb.forward([f'tcp:{self._port}', f'tcp:{ANDROID_SERVER_GRPC_PORT}'])  # type: ignore
 
-        # wait a few seconds for the Android gRPC server to be started.
-        time.sleep(3)
-
-        return PandoraClient(f'localhost:{self._port}')
+        return PandoraClient(f'localhost:{self._port}', 'android')
 
     def stop(self) -> None:
         """Stops and cleans up the Pandora server on the Android device."""
@@ -139,5 +141,6 @@ class AndroidPandoraServer(PandoraServer[AndroidDevice]):
             'shell', f'am force-stop {ANDROID_SERVER_PACKAGE}', shell=False, timeout=None, stderr=None
         )
 
-        self.device.adb.forward(['--remove', f'tcp:{ANDROID_SERVER_GRPC_PORT}'])  # type: ignore
+        self.device.adb.forward(['--remove', f'tcp:{self._port}'])  # type: ignore
         self._instrumentation.join()
+        self._instrumentation = None
