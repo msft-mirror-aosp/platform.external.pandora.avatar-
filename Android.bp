@@ -20,6 +20,7 @@ python_library_host {
     srcs: [
         "avatar/*.py",
         "avatar/controllers/*.py",
+        "avatar/metrics/*.py",
     ],
     libs: [
         "pandora-python",
