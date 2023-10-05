@@ -19,6 +19,7 @@ python_library_host {
     name: "libavatar",
     srcs: [
         "avatar/*.py",
+        "avatar/cases/*.py",
         "avatar/controllers/*.py",
         "avatar/metrics/*.py",
     ],
@@ -32,9 +33,4 @@ python_library_host {
     data: [
         "avatar/py.typed"
     ]
-}
-
-filegroup {
-    name: "avatar-cases",
-    srcs: ["cases/*.py"],
 }
