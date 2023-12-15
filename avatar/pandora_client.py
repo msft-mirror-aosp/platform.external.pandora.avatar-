@@ -23,11 +23,16 @@ import grpc
 import grpc.aio
 import logging
 
+from avatar.metrics.interceptors import aio_interceptors
+from avatar.metrics.interceptors import interceptors
 from bumble import pandora as bumble_server
 from bumble.hci import Address as BumbleAddress
 from bumble.pandora.device import PandoraDevice as BumblePandoraDevice
 from dataclasses import dataclass
-from pandora import host_grpc, host_grpc_aio, security_grpc, security_grpc_aio
+from pandora import host_grpc
+from pandora import host_grpc_aio
+from pandora import security_grpc
+from pandora import security_grpc_aio
 from typing import Any, Dict, MutableMapping, Optional, Tuple, Union
 
 
@@ -75,7 +80,7 @@ class PandoraClient:
         self.name = name
         self.grpc_target = grpc_target
         self.log = PandoraClientLoggerAdapter(logging.getLogger(), {'client': self})
-        self._channel = grpc.insecure_channel(grpc_target)  # type: ignore
+        self._channel = grpc.intercept_channel(grpc.insecure_channel(grpc_target), *interceptors(self))  # type: ignore
         self._address = Address(b'\x00\x00\x00\x00\x00\x00')
         self._aio = None
 
@@ -169,7 +174,9 @@ class PandoraClient:
     @property
     def aio(self) -> 'PandoraClient.Aio':
         if not self._aio:
-            self._aio = PandoraClient.Aio(grpc.aio.insecure_channel(self.grpc_target))
+            self._aio = PandoraClient.Aio(
+                grpc.aio.insecure_channel(self.grpc_target, interceptors=aio_interceptors(self))
+            )
         return self._aio
 
 
@@ -181,7 +188,7 @@ class PandoraClientLoggerAdapter(logging.LoggerAdapter):  # type: ignore
         client = self.extra['client']
         assert isinstance(client, PandoraClient)
         addr = ':'.join([f'{x:02X}' for x in client.address[4:]])
-        return (f'[{client.name}:{addr}] {msg}', kwargs)
+        return (f'[{client.name:<8}:{addr}] {msg}', kwargs)
 
 
 class BumblePandoraClient(PandoraClient):
