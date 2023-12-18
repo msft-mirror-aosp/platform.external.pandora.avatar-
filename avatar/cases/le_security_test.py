@@ -17,22 +17,35 @@ import avatar
 import itertools
 import logging
 
-from avatar import BumblePandoraDevice, PandoraDevice, PandoraDevices
-from bumble.hci import HCI_CENTRAL_ROLE, HCI_PERIPHERAL_ROLE
+from avatar import BumblePandoraDevice
+from avatar import PandoraDevice
+from avatar import PandoraDevices
+from avatar import pandora
+from bumble.pairing import PairingConfig
 from bumble.pairing import PairingDelegate
-from mobly import base_test, signals, test_runner
+from mobly import base_test
+from mobly import signals
+from mobly import test_runner
 from mobly.asserts import assert_equal  # type: ignore
 from mobly.asserts import assert_in  # type: ignore
 from mobly.asserts import assert_is_not_none  # type: ignore
 from mobly.asserts import fail  # type: ignore
+from pandora.host_pb2 import PUBLIC
+from pandora.host_pb2 import RANDOM
 from pandora.host_pb2 import Connection
-from pandora.security_pb2 import LEVEL2, PairingEventAnswer, SecureResponse, WaitSecurityResponse
+from pandora.host_pb2 import DataTypes
+from pandora.host_pb2 import OwnAddressType
+from pandora.security_pb2 import LE_LEVEL3
+from pandora.security_pb2 import LEVEL2
+from pandora.security_pb2 import PairingEventAnswer
+from pandora.security_pb2 import SecureResponse
+from pandora.security_pb2 import WaitSecurityResponse
 from typing import Any, Literal, Optional, Tuple, Union
 
 
-class SecurityTest(base_test.BaseTestClass):  # type: ignore[misc]
+class LeSecurityTest(base_test.BaseTestClass):  # type: ignore[misc]
     '''
-    This class aim to test SSP (Secure Simple Pairing) on Classic
+    This class aim to test LE Pairing on LE
     Bluetooth devices.
     '''
 
@@ -42,24 +55,14 @@ class SecurityTest(base_test.BaseTestClass):  # type: ignore[misc]
     dut: PandoraDevice
     ref: PandoraDevice
 
-    @avatar.asynchronous
-    async def setup_class(self) -> None:
+    def setup_class(self) -> None:
         self.devices = PandoraDevices(self)
         self.dut, self.ref, *_ = self.devices
 
-        # Enable BR/EDR mode and SSP for Bumble devices.
+        # Enable BR/EDR for Bumble devices.
         for device in self.devices:
             if isinstance(device, BumblePandoraDevice):
                 device.config.setdefault('classic_enabled', True)
-                device.config.setdefault('classic_ssp_enabled', True)
-                device.config.setdefault(
-                    'server',
-                    {
-                        'io_capability': 'display_output_and_yes_no_input',
-                    },
-                )
-
-        await asyncio.gather(self.dut.reset(), self.ref.reset())
 
     def teardown_class(self) -> None:
         if self.devices:
@@ -69,6 +72,7 @@ class SecurityTest(base_test.BaseTestClass):  # type: ignore[misc]
         *itertools.product(
             ('outgoing_connection', 'incoming_connection'),
             ('outgoing_pairing', 'incoming_pairing'),
+            ('against_random', 'against_public'),
             (
                 'accept',
                 'reject',
@@ -82,17 +86,23 @@ class SecurityTest(base_test.BaseTestClass):  # type: ignore[misc]
                 'against_keyboard_only',
                 'against_display_only',
                 'against_display_yes_no',
+                'against_both_display_and_keyboard',
             ),
-            ('against_central', 'against_peripheral'),
+            (
+                'ltk_irk_csrk',
+                'ltk_irk_csrk_lk',
+            ),
         )
     )  # type: ignore[misc]
     @avatar.asynchronous
-    async def test_ssp(
+    async def test_le_pairing(
         self,
         connect: Union[Literal['outgoing_connection'], Literal['incoming_connection']],
         pair: Union[Literal['outgoing_pairing'], Literal['incoming_pairing']],
+        ref_address_type_name: Union[Literal['against_random'], Literal['against_public']],
         variant: Union[
             Literal['accept'],
+            Literal['accept_ctkd'],
             Literal['reject'],
             Literal['rejected'],
             Literal['disconnect'],
@@ -104,18 +114,20 @@ class SecurityTest(base_test.BaseTestClass):  # type: ignore[misc]
             Literal['against_keyboard_only'],
             Literal['against_display_only'],
             Literal['against_display_yes_no'],
+            Literal['against_both_display_and_keyboard'],
         ],
-        ref_role: Union[
-            Literal['against_central'],
-            Literal['against_peripheral'],
+        key_distribution: Union[
+            Literal['ltk_irk_csrk'],
+            Literal['ltk_irk_csrk_lk'],
         ],
     ) -> None:
         if self.dut.name == 'android' and connect == 'outgoing_connection' and pair == 'incoming_pairing':
             # TODO: do not skip when doing physical tests.
-            raise signals.TestSkip(
-                'TODO: Fix rootcanal when both side trigger authentication:\n'
-                + 'Android always trigger auth for outgoing connections.'
-            )
+            raise signals.TestSkip('TODO: Yet to implement the test cases:\n')
+
+        if self.dut.name == 'android' and connect == 'incoming_connection' and pair == 'outgoing_pairing':
+            # TODO: do not skip when doing physical tests.
+            raise signals.TestSkip('TODO: Yet to implement the test cases:\n')
 
         if self.dut.name == 'android' and 'disconnect' in variant:
             raise signals.TestSkip(
@@ -124,28 +136,20 @@ class SecurityTest(base_test.BaseTestClass):  # type: ignore[misc]
                 + '- When disconnected the `Secure/WaitSecurity` never returns.'
             )
 
-        if (
-            self.dut.name == 'android'
-            and ref_io_capability == 'against_keyboard_only'
-            and variant == 'rejected'
-            and (connect == 'incoming_connection' or pair == 'outgoing_pairing')
-        ):
-            raise signals.TestSkip(
-                'TODO: Fix AOSP stack for this variant:\n'
-                + 'Android does not seems to react correctly against pairing reject from KEYBOARD_ONLY devices.'
-            )
+        if self.dut.name == 'android' and 'reject' in variant:
+            raise signals.TestSkip('TODO: Currently these scnearios are not working. Working on them.')
 
-        if self.dut.name == 'android' and pair == 'outgoing_pairing' and ref_role == 'against_central':
-            raise signals.TestSkip(
-                'TODO: Fix PandoraSecurity server for android:\n'
-                + 'report the encryption state the with the bonding state'
-            )
+        if self.ref.name == 'android' and ref_address_type_name == 'against_public':
+            raise signals.TestSkip('Android does not support PUBLIC address type.')
 
         if isinstance(self.ref, BumblePandoraDevice) and ref_io_capability == 'against_default_io_cap':
             raise signals.TestSkip('Skip default IO cap for Bumble REF.')
 
         if not isinstance(self.ref, BumblePandoraDevice) and ref_io_capability != 'against_default_io_cap':
             raise signals.TestSkip('Unable to override IO capability on non Bumble device.')
+
+        if 'lk' in key_distribution and ref_io_capability == 'against_no_output_no_input':
+            raise signals.TestSkip('CTKD requires Security Level 4')
 
         # Factory reset both DUT and REF devices.
         await asyncio.gather(self.dut.reset(), self.ref.reset())
@@ -157,8 +161,39 @@ class SecurityTest(base_test.BaseTestClass):  # type: ignore[misc]
                 'against_keyboard_only': PairingDelegate.IoCapability.KEYBOARD_INPUT_ONLY,
                 'against_display_only': PairingDelegate.IoCapability.DISPLAY_OUTPUT_ONLY,
                 'against_display_yes_no': PairingDelegate.IoCapability.DISPLAY_OUTPUT_AND_YES_NO_INPUT,
+                'against_both_display_and_keyboard': PairingDelegate.IoCapability.DISPLAY_OUTPUT_AND_KEYBOARD_INPUT,
             }[ref_io_capability]
             self.ref.server_config.io_capability = io_capability
+            bumble_key_distribution = sum(
+                {
+                    'ltk': PairingDelegate.KeyDistribution.DISTRIBUTE_ENCRYPTION_KEY,
+                    'irk': PairingDelegate.KeyDistribution.DISTRIBUTE_IDENTITY_KEY,
+                    'csrk': PairingDelegate.KeyDistribution.DISTRIBUTE_SIGNING_KEY,
+                    'lk': PairingDelegate.KeyDistribution.DISTRIBUTE_LINK_KEY,
+                }[x]
+                for x in key_distribution.split('_')
+            )
+            assert bumble_key_distribution
+            self.ref.server_config.smp_local_initiator_key_distribution = bumble_key_distribution
+            self.ref.server_config.smp_local_responder_key_distribution = bumble_key_distribution
+            self.ref.server_config.identity_address_type = PairingConfig.AddressType.PUBLIC
+
+        if isinstance(self.dut, BumblePandoraDevice):
+            ALL_KEYS = (
+                PairingDelegate.KeyDistribution.DISTRIBUTE_ENCRYPTION_KEY
+                | PairingDelegate.KeyDistribution.DISTRIBUTE_IDENTITY_KEY
+                | PairingDelegate.KeyDistribution.DISTRIBUTE_SIGNING_KEY
+                | PairingDelegate.KeyDistribution.DISTRIBUTE_LINK_KEY
+            )
+            self.dut.server_config.smp_local_initiator_key_distribution = ALL_KEYS
+            self.dut.server_config.smp_local_responder_key_distribution = ALL_KEYS
+            self.dut.server_config.identity_address_type = PairingConfig.AddressType.PUBLIC
+
+        dut_address_type = RANDOM
+        ref_address_type = {
+            'against_random': RANDOM,
+            'against_public': PUBLIC,
+        }[ref_address_type_name]
 
         # Pandora connection tokens
         ref_dut, dut_ref = None, None
@@ -168,50 +203,50 @@ class SecurityTest(base_test.BaseTestClass):  # type: ignore[misc]
             nonlocal ref_dut
             nonlocal dut_ref
 
-            # Make classic connection task.
-            async def bredr_connect(
-                initiator: PandoraDevice, acceptor: PandoraDevice
+            # Make LE connection task.
+            async def connect_le(
+                initiator: PandoraDevice,
+                acceptor: PandoraDevice,
+                initiator_addr_type: OwnAddressType,
+                acceptor_addr_type: OwnAddressType,
             ) -> Tuple[Connection, Connection]:
-                init_res, wait_res = await asyncio.gather(
-                    initiator.aio.host.Connect(address=acceptor.address),
-                    acceptor.aio.host.WaitConnection(address=initiator.address),
+                # Acceptor - Advertise
+                advertisement = acceptor.aio.host.Advertise(
+                    legacy=True,
+                    connectable=True,
+                    own_address_type=acceptor_addr_type,
+                    data=DataTypes(manufacturer_specific_data=b'pause cafe'),
                 )
-                assert_equal(init_res.result_variant(), 'connection')
-                assert_equal(wait_res.result_variant(), 'connection')
-                assert init_res.connection is not None and wait_res.connection is not None
-                return init_res.connection, wait_res.connection
 
-            # Make classic connection.
+                # Initiator - Scan and fetch the address
+                scan = initiator.aio.host.Scan(own_address_type=initiator_addr_type)
+                acceptor_scan = await anext(
+                    (x async for x in scan if b'pause cafe' in x.data.manufacturer_specific_data)
+                )  # pytype: disable=name-error
+                scan.cancel()
+
+                # Initiator - LE connect
+                return await pandora.connect_le(initiator, advertisement, acceptor_scan, initiator_addr_type)
+
+            # Make LE connection.
             if connect == 'incoming_connection':
-                ref_dut, dut_ref = await bredr_connect(self.ref, self.dut)
+                # DUT is acceptor
+                ref_dut, dut_ref = await connect_le(self.ref, self.dut, ref_address_type, dut_address_type)
             else:
-                dut_ref, ref_dut = await bredr_connect(self.dut, self.ref)
-
-            # Role switch.
-            if isinstance(self.ref, BumblePandoraDevice):
-                ref_dut_raw = self.ref.device.lookup_connection(int.from_bytes(ref_dut.cookie.value, 'big'))
-                if ref_dut_raw is not None:
-                    role = {
-                        'against_central': HCI_CENTRAL_ROLE,
-                        'against_peripheral': HCI_PERIPHERAL_ROLE,
-                    }[ref_role]
-
-                    if ref_dut_raw.role != role:
-                        self.ref.log.info(
-                            f"Role switch to: {'`CENTRAL`' if role == HCI_CENTRAL_ROLE else '`PERIPHERAL`'}"
-                        )
-                        await ref_dut_raw.switch_role(role)
+                # DUT is initiator
+                dut_ref, ref_dut = await connect_le(self.dut, self.ref, dut_address_type, ref_address_type)
 
             # Pairing.
+
             if pair == 'incoming_pairing':
                 return await asyncio.gather(
-                    self.ref.aio.security.Secure(connection=ref_dut, classic=LEVEL2),
-                    self.dut.aio.security.WaitSecurity(connection=dut_ref, classic=LEVEL2),
+                    self.ref.aio.security.Secure(connection=ref_dut, le=LE_LEVEL3),
+                    self.dut.aio.security.WaitSecurity(connection=dut_ref, le=LE_LEVEL3),
                 )
-
+            # Outgoing pairing
             return await asyncio.gather(
-                self.dut.aio.security.Secure(connection=dut_ref, classic=LEVEL2),
-                self.ref.aio.security.WaitSecurity(connection=ref_dut, classic=LEVEL2),
+                self.dut.aio.security.Secure(connection=dut_ref, le=LE_LEVEL3),
+                self.ref.aio.security.WaitSecurity(connection=ref_dut, le=LE_LEVEL3),
             )
 
         # Listen for pairing event on bot DUT and REF.
@@ -221,6 +256,7 @@ class SecurityTest(base_test.BaseTestClass):  # type: ignore[misc]
         connect_and_pair_task = asyncio.create_task(connect_and_pair())
 
         shall_pass = variant == 'accept'
+
         try:
             dut_pairing_fut = asyncio.create_task(anext(dut_pairing))
             ref_pairing_fut = asyncio.create_task(anext(ref_pairing))
@@ -330,6 +366,20 @@ class SecurityTest(base_test.BaseTestClass):  # type: ignore[misc]
                 if shall_pass:
                     assert_equal(secure.result_variant(), 'success')
                     assert_equal(wait_security.result_variant(), 'success')
+                    if 'lk' in key_distribution:
+                        # Make a Classic connection
+                        if self.dut.name == 'android':
+                            # Android IOP: Android automatically trigger a BR/EDR connection request
+                            # in this case.
+                            ref_dut_classic_res = await self.ref.aio.host.WaitConnection(self.dut.address)
+                            assert_is_not_none(ref_dut_classic_res.connection)
+                            assert ref_dut_classic_res.connection
+                            ref_dut_classic = ref_dut_classic_res.connection
+                        else:
+                            ref_dut_classic, _ = await pandora.connect(self.ref, self.dut)
+                        # Try to encrypt Classic connection
+                        ref_dut_secure = await self.ref.aio.security.Secure(ref_dut_classic, classic=LEVEL2)
+                        assert_equal(ref_dut_secure.result_variant(), 'success')
                 else:
                     assert_in(
                         secure.result_variant(),
