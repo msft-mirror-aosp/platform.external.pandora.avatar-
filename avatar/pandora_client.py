@@ -15,6 +15,7 @@
 
 """Pandora client interface for Avatar tests."""
 
+import asyncio
 import avatar.aio
 import bumble
 import bumble.device
@@ -22,11 +23,17 @@ import grpc
 import grpc.aio
 import logging
 
-from avatar.bumble_device import BumbleDevice
+from avatar.metrics.interceptors import aio_interceptors
+from avatar.metrics.interceptors import interceptors
+from bumble import pandora as bumble_server
 from bumble.hci import Address as BumbleAddress
+from bumble.pandora.device import PandoraDevice as BumblePandoraDevice
 from dataclasses import dataclass
-from pandora import asha_grpc, asha_grpc_aio, host_grpc, host_grpc_aio, security_grpc, security_grpc_aio
-from typing import Any, MutableMapping, Optional, Tuple, Union
+from pandora import host_grpc
+from pandora import host_grpc_aio
+from pandora import security_grpc
+from pandora import security_grpc_aio
+from typing import Any, Dict, MutableMapping, Optional, Tuple, Union
 
 
 class Address(bytes):
@@ -53,11 +60,12 @@ class PandoraClient:
     """Provides Pandora interface access to a device via gRPC."""
 
     # public fields
+    name: str
     grpc_target: str  # Server address for the gRPC channel.
     log: 'PandoraClientLoggerAdapter'  # Logger adapter.
-    channel: grpc.Channel  # Synchronous gRPC channel.
 
     # private fields
+    _channel: grpc.Channel  # Synchronous gRPC channel.
     _address: Address  # Bluetooth device address
     _aio: Optional['PandoraClient.Aio']  # Asynchronous gRPC channel.
 
@@ -69,15 +77,16 @@ class PandoraClient:
         Args:
           grpc_target: Server address for the gRPC channel.
         """
+        self.name = name
         self.grpc_target = grpc_target
-        self.log = PandoraClientLoggerAdapter(logging.getLogger(), {'client': self, 'client_name': name})
-        self.channel = grpc.insecure_channel(grpc_target)  # type: ignore
+        self.log = PandoraClientLoggerAdapter(logging.getLogger(), {'client': self})
+        self._channel = grpc.intercept_channel(grpc.insecure_channel(grpc_target), *interceptors(self))  # type: ignore
         self._address = Address(b'\x00\x00\x00\x00\x00\x00')
         self._aio = None
 
     def close(self) -> None:
         """Closes the gRPC channels."""
-        self.channel.close()
+        self._channel.close()
         if self._aio:
             avatar.aio.run_until_complete(self._aio.channel.close())
 
@@ -93,19 +102,38 @@ class PandoraClient:
 
     async def reset(self) -> None:
         """Factory reset the device & read it's BD address."""
-        await self.aio.host.FactoryReset()
-        # Factory reset stopped the server, close the client too.
-        assert self._aio
-        await self._aio.channel.close()
-        self._aio = None
-        # Try to connect to the new server 3 times before failing.
-        for _ in range(0, 3):
+        attempts, max_attempts = 1, 3
+        while True:
             try:
-                self._address = Address((await self.aio.host.ReadLocalAddress(wait_for_ready=True)).address)
+                await self.aio.host.FactoryReset(wait_for_ready=True, timeout=15.0)
+
+                # Factory reset stopped the server, close the client too.
+                assert self._aio
+                await self._aio.channel.close()
+                self._aio = None
+
+                # This call might fail if the server is unavailable.
+                self._address = Address(
+                    (await self.aio.host.ReadLocalAddress(wait_for_ready=True, timeout=15.0)).address
+                )
                 return
-            except grpc.RpcError as e:
-                assert e.code() == grpc.StatusCode.UNAVAILABLE  # type: ignore
-        raise RuntimeError('unable to establish a new connection after a `FactoryReset`')
+            except grpc.aio.AioRpcError as e:
+                if e.code() in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.DEADLINE_EXCEEDED):
+                    if attempts <= max_attempts:
+                        self.log.debug(f'Server unavailable, retry [{attempts}/{max_attempts}].')
+                        attempts += 1
+                        continue
+                    self.log.exception(f'Server still unavailable after {attempts} attempts, abort.')
+                raise e
+
+    @property
+    def channel(self) -> grpc.Channel:
+        """Returns the synchronous gRPC channel."""
+        try:
+            _ = asyncio.get_running_loop()
+        except:
+            return self._channel
+        raise RuntimeError('Trying to use the synchronous gRPC channel from asynchronous code.')
 
     # Pandora interfaces
 
@@ -123,11 +151,6 @@ class PandoraClient:
     def security_storage(self) -> security_grpc.SecurityStorage:
         """Returns the Pandora SecurityStorage gRPC interface."""
         return security_grpc.SecurityStorage(self.channel)
-
-    @property
-    def asha(self) -> asha_grpc.ASHA:
-        """Returns the Pandora ASHA gRPC interface."""
-        return asha_grpc.ASHA(self.channel)
 
     @dataclass
     class Aio:
@@ -148,15 +171,12 @@ class PandoraClient:
             """Returns the Pandora SecurityStorage gRPC interface."""
             return security_grpc_aio.SecurityStorage(self.channel)
 
-        @property
-        def asha(self) -> asha_grpc_aio.ASHA:
-            """Returns the Pandora ASHA gRPC interface."""
-            return asha_grpc_aio.ASHA(self.channel)
-
     @property
     def aio(self) -> 'PandoraClient.Aio':
         if not self._aio:
-            self._aio = PandoraClient.Aio(grpc.aio.insecure_channel(self.grpc_target))
+            self._aio = PandoraClient.Aio(
+                grpc.aio.insecure_channel(self.grpc_target, interceptors=aio_interceptors(self))
+            )
         return self._aio
 
 
@@ -167,19 +187,28 @@ class PandoraClientLoggerAdapter(logging.LoggerAdapter):  # type: ignore
         assert self.extra
         client = self.extra['client']
         assert isinstance(client, PandoraClient)
-        client_name = self.extra.get('client_name', client.__class__.__name__)
         addr = ':'.join([f'{x:02X}' for x in client.address[4:]])
-        return (f'[{client_name}:{addr}] {msg}', kwargs)
+        return (f'[{client.name:<8}:{addr}] {msg}', kwargs)
 
 
 class BumblePandoraClient(PandoraClient):
     """Special Pandora client which also give access to a Bumble device instance."""
 
-    _bumble: BumbleDevice  # Bumble device wrapper.
+    _bumble: BumblePandoraDevice  # Bumble device wrapper.
+    _server_config: bumble_server.Config  # Bumble server config.
 
-    def __init__(self, grpc_target: str, bumble: BumbleDevice) -> None:
+    def __init__(self, grpc_target: str, bumble: BumblePandoraDevice, server_config: bumble_server.Config) -> None:
         super().__init__(grpc_target, 'bumble')
         self._bumble = bumble
+        self._server_config = server_config
+
+    @property
+    def server_config(self) -> bumble_server.Config:
+        return self._server_config
+
+    @property
+    def config(self) -> Dict[str, Any]:
+        return self._bumble.config
 
     @property
     def device(self) -> bumble.device.Device:
